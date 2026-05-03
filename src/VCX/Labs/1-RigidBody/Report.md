@@ -2,8 +2,7 @@
 ## Introduction
 在整个lab中，可以使用“Alt+F”来Reset Scene。在lab3 中，按住“Shift”的同时按住鼠标左键可以根据按住的时长动态添加盒子
 ## Task 1: Single Body
-在VCX::Labs::RigidBody命名空间里定义了Box这一刚体，并单独放置在RigidBody.h中（因为原本考虑后续可能会有其他形状的刚体加入）。定义了Eigen::Vector3f   velocity,   Eigen::Vector3f     angularvelocity,
-Eigen::Quaternionf    orientation等物理量来表示盒子的运动状态。仿照lab0渲染了整个场景。
+在VCX::Labs::RigidBody命名空间里定义了Box这一刚体，并单独放置在RigidBody.h中（因为原本考虑后续可能会有其他形状的刚体加入）。定义了Eigen::Vector3f   velocity,   Eigen::Vector3f     angularvelocity,  Eigen::Quaternionf    orientation等物理量来表示盒子的运动状态。仿照lab0渲染了整个场景。
 
 效果如下：
 ![alt text](lab1_case1.png)

@@ -45,8 +45,8 @@ namespace VCX::Labs::Fluid {
         glm::vec3 gravity { 0, -9.81f, 0 };
 
         void integrateParticles(float timeStep);
-        void pushParticlesApart(int numIters);
-        void handleParticleCollisions(glm::vec3 obstaclePos, float obstacleRadius, glm::vec3 obstacleVel);
+        void pushParticlesApart(int numIters, float timeStep);
+        void handleParticleCollisions(glm::vec3 obstaclePos, float obstacleRadius, glm::vec3 obstacleVel, float timeStep);
         void updateParticleDensity();
 
         void        transferVelocities(bool toGrid, float flipRatio);
@@ -71,10 +71,10 @@ namespace VCX::Labs::Fluid {
 
             for (int step = 0; step < numSubSteps; step++) {
                 integrateParticles(sdt);
-                handleParticleCollisions(obstaclePos, 0.0, obstacleVel);
+                handleParticleCollisions(obstaclePos, 0.0, obstacleVel, sdt);
                 if (separateParticles)
-                    pushParticlesApart(numParticleIters);
-                handleParticleCollisions(obstaclePos, 0.0, obstacleVel);
+                    pushParticlesApart(numParticleIters, sdt);
+                handleParticleCollisions(obstaclePos, 0.0, obstacleVel, sdt);
                 transferVelocities(true, flipRatio);
                 updateParticleDensity();
                 solveIncompressibility(numPressureIters, sdt, overRelaxation, compensateDrift);

@@ -4,15 +4,15 @@
 #include "Engine/GL/Program.h"
 #include "Engine/GL/UniformBlock.hpp"
 #include "Engine/Sphere.h"
-#include "Labs/0-GettingStarted/FluidSimulator.h"
+// #include "Labs/0-GettingStarted/FluidSimulator.h"
+#include "Labs/2-FluidSimulation/FluidSimulator.h"
 #include "Labs/Common/ICase.h"
 #include "Labs/Common/ImageRGB.h"
 #include "Labs/Common/OrbitCameraManager.h"
 #include "Labs/Scene/Content.h"
 #include "Labs/Scene/SceneObject.h"
 
-
-namespace VCX::Labs::GettingStarted {
+namespace VCX::Labs::FluidSimulation {
 
     class CaseFluid : public Common::ICase {
     public:
@@ -47,10 +47,26 @@ namespace VCX::Labs::GettingStarted {
         float                               _BndWidth { 2.0 };
         bool                                _stopped { false };
         Engine::Model                       _sphere;
-        int                                 _res { 1024 };
+        int                                 _res {24 };
         float                               _r;
         int                                 numofSpheres;
         Fluid::Simulator                    _simulation;
+
+        int   _numSubSteps { 1 };
+        int   _numParticleIters { 5 };
+        int   _numPressureIters { 20 };
+        bool  _separateParticles { true };
+        float _overRelaxation { 0.5f };
+        bool  _compensateDrift { true };
+        bool  _enableObstacleDrag { true };
+        bool  _draggingObstacle { false };
+        glm::vec3 _dragPlanePoint { 0.0f };
+        glm::vec3 _dragPlaneNormal { 0.0f, 0.0f, 1.0f };
+        glm::vec3 _dragAnchorOffset { 0.0f };
+
+        glm::vec3 _obstaclePos { 0.0f };
+        glm::vec3 _obstacleVel { 0.0f };
+        float     _obstacleRadius { 0.12f };
 
         char const *          GetSceneName(std::size_t const i) const { return VCX::Labs::Rendering::Content::SceneNames[std::size_t(_scenes[i])].c_str(); }
         Engine::Scene const & GetScene(std::size_t const i) const { return VCX::Labs::Rendering::Content::Scenes[std::size_t(_scenes[i])]; }
