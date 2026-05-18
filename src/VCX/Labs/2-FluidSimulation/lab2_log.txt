@@ -1,0 +1,159 @@
+commit db03e7c5a5f39aa1c655d4711f6be9584a4a6667
+Author: Dogs1r <2974144621@qq.com>
+Date:   Sun May 3 09:48:37 2026 +0800
+
+    Finish part of lab2
+
+ src/VCX/Labs/0-GettingStarted/CaseFluid.h          |   2 +-
+ src/VCX/Labs/1-RigidBody/Report.md                 |   3 +-
+ src/VCX/Labs/1-RigidBody/lab1_log.txt              | 137 ++++++
+ src/VCX/Labs/2-FluidSimulation/App.cpp             |  16 +
+ src/VCX/Labs/2-FluidSimulation/App.h               |  25 ++
+ src/VCX/Labs/2-FluidSimulation/CaseFluid.cpp       | 256 +++++++++++
+ src/VCX/Labs/2-FluidSimulation/CaseFluid.h         |  75 ++++
+ src/VCX/Labs/2-FluidSimulation/FluidSimulator.cpp  | 481 +++++++++++++++++++++
+ src/VCX/Labs/2-FluidSimulation/FluidSimulator.h    |  12 +-
+ src/VCX/Labs/2-FluidSimulation/Report.md           |  19 +
+ src/VCX/Labs/2-FluidSimulation/Report.pdf          | Bin 0 -> 795495 bytes
+ src/VCX/Labs/2-FluidSimulation/main.cpp            |  15 +-
+ ...77\257\350\247\206\345\233\276\357\274\211.png" | Bin 0 -> 882347 bytes
+ ...70\262\346\237\223\345\274\200\345\247\213.png" | Bin 0 -> 481818 bytes
+ 14 files changed, 1031 insertions(+), 10 deletions(-)
+
+commit e98ceac949983df998b0d10ca4cbd9949fe8747f
+Author: Dogs1r <2974144621@qq.com>
+Date:   Sat Apr 4 10:16:52 2026 +0800
+
+    Finish part of Lab1
+
+ src/VCX/Labs/1-RigidBody/AdvancedCollisionSolver.h | 117 +++++++
+ src/VCX/Labs/1-RigidBody/App.cpp                   |  13 +
+ src/VCX/Labs/1-RigidBody/App.h                     |  28 ++
+ src/VCX/Labs/1-RigidBody/CaseMultiBody.cpp         | 380 +++++++++++++++++++++
+ src/VCX/Labs/1-RigidBody/CaseMultiBody.h           |  97 ++++++
+ src/VCX/Labs/1-RigidBody/CaseSingleBody.cpp        | 150 ++++++++
+ src/VCX/Labs/1-RigidBody/CaseSingleBody.h          |  40 +++
+ src/VCX/Labs/1-RigidBody/CaseTwoBody.cpp           | 230 +++++++++++++
+ src/VCX/Labs/1-RigidBody/CaseTwoBody.h             |  50 +++
+ src/VCX/Labs/1-RigidBody/Report.md                 |  70 ++++
+ src/VCX/Labs/1-RigidBody/Report.pdf                | Bin 0 -> 813305 bytes
+ src/VCX/Labs/1-RigidBody/RigidBody.h               |  45 +++
+ src/VCX/Labs/1-RigidBody/TwoBodyCollision.cpp      |  61 ++++
+ src/VCX/Labs/1-RigidBody/TwoBodyCollision.h        |  11 +
+ src/VCX/Labs/1-RigidBody/lab1_case1.png            | Bin 0 -> 125349 bytes
+ src/VCX/Labs/1-RigidBody/lab1_case2.png            | Bin 0 -> 137680 bytes
+ src/VCX/Labs/1-RigidBody/lab1_case3.png            | Bin 0 -> 124498 bytes
+ src/VCX/Labs/1-RigidBody/main.cpp                  |  12 +-
+ src/VCX/Labs/Common/ForceManager.cpp               | 137 ++++++++
+ src/VCX/Labs/Common/ForceManager.h                 |  26 ++
+ 20 files changed, 1465 insertions(+), 2 deletions(-)
+
+commit 583190cce1cb7df96ef21fe2a2474af2d2d56809
+Author: RachelChu <mchu@pku.edu.cn>
+Date:   Tue Mar 3 11:36:28 2026 +0800
+
+    code base
+
+ .clang-format                                    | 152 ++++
+ .gitignore                                       |  11 +
+ LICENSE                                          |  21 +
+ README.md                                        | 176 +++++
+ assets/fonts/Ubuntu.ttf                          | Bin 0 -> 279384 bytes
+ assets/fonts/UbuntuMono.ttf                      | Bin 0 -> 205748 bytes
+ assets/images/ground.jpg                         | Bin 0 -> 339354 bytes
+ assets/images/lab0-case1.png                     | Bin 0 -> 42293 bytes
+ assets/images/lab0-case2.png                     | Bin 0 -> 58986 bytes
+ assets/images/lab0-case3.png                     | Bin 0 -> 144187 bytes
+ assets/images/lab0-case4.png                     | Bin 0 -> 110155 bytes
+ assets/images/lab0-case5.png                     | Bin 0 -> 193874 bytes
+ assets/images/vcl-logo-16x16.png                 | Bin 0 -> 1985 bytes
+ assets/images/vcl-logo-256x256.png               | Bin 0 -> 4533 bytes
+ assets/images/vcl-logo-32x32.png                 | Bin 0 -> 2203 bytes
+ assets/images/vcl-logo-48x48.png                 | Bin 0 -> 2439 bytes
+ assets/scenes/fluid/fluid.yaml                   |  21 +
+ assets/shaders/flat.frag                         |  11 +
+ assets/shaders/flat.vert                         |  14 +
+ assets/shaders/fluid.frag                        |  77 ++
+ assets/shaders/fluid.vert                        |  36 +
+ assets/shaders/phong.frag                        |  92 +++
+ assets/shaders/sphere_phong.vert                 |  36 +
+ assets/shaders/triangle.frag                     |   9 +
+ assets/shaders/triangle.vert                     |  11 +
+ lab0-GettingStarted.md                           | 107 +++
+ src/3rdparty/imgui_impl_glfw.cpp                 | 663 +++++++++++++++++
+ src/3rdparty/imgui_impl_glfw.h                   |  46 ++
+ src/3rdparty/imgui_impl_opengl3.cpp              | 871 +++++++++++++++++++++++
+ src/3rdparty/imgui_impl_opengl3.h                |  55 ++
+ src/3rdparty/imgui_impl_opengl3_loader.h         | 786 ++++++++++++++++++++
+ src/3rdparty/scope.hpp                           | 574 +++++++++++++++
+ src/3rdparty/stb_image.cpp                       |   4 +
+ src/3rdparty/tiny_obj_loader.cpp                 |   4 +
+ src/VCX/Assets/bundled.h                         |  29 +
+ src/VCX/Engine/Async.hpp                         |  67 ++
+ src/VCX/Engine/Camera.hpp                        |  31 +
+ src/VCX/Engine/Formats.hpp                       | 136 ++++
+ src/VCX/Engine/GL/Frame.hpp                      | 178 +++++
+ src/VCX/Engine/GL/Program.cpp                    |  37 +
+ src/VCX/Engine/GL/Program.h                      |  36 +
+ src/VCX/Engine/GL/RenderItem.cpp                 |  70 ++
+ src/VCX/Engine/GL/RenderItem.h                   |  68 ++
+ src/VCX/Engine/GL/Sampler.hpp                    |  59 ++
+ src/VCX/Engine/GL/Shader.cpp                     |  57 ++
+ src/VCX/Engine/GL/Shader.h                       |  29 +
+ src/VCX/Engine/GL/Texture.hpp                    | 187 +++++
+ src/VCX/Engine/GL/UniformBlock.hpp               |  32 +
+ src/VCX/Engine/GL/VertexLayout.hpp               | 104 +++
+ src/VCX/Engine/GL/resource.hpp                   | 190 +++++
+ src/VCX/Engine/GL/uniform.hpp                    | 137 ++++
+ src/VCX/Engine/Scene.cpp                         |  14 +
+ src/VCX/Engine/Scene.h                           |  82 +++
+ src/VCX/Engine/Sphere.cpp                        |  54 ++
+ src/VCX/Engine/Sphere.h                          |  26 +
+ src/VCX/Engine/SurfaceMesh.cpp                   |  83 +++
+ src/VCX/Engine/SurfaceMesh.h                     |  40 ++
+ src/VCX/Engine/TextureND.hpp                     | 121 ++++
+ src/VCX/Engine/app.cpp                           | 212 ++++++
+ src/VCX/Engine/app.h                             |  69 ++
+ src/VCX/Engine/loader.cpp                        | 442 ++++++++++++
+ src/VCX/Engine/loader.h                          |  21 +
+ src/VCX/Engine/math.hpp                          |  30 +
+ src/VCX/Engine/prelude.hpp                       |  30 +
+ src/VCX/Engine/type.hpp                          |  41 ++
+ src/VCX/Examples/ImGui/main.cpp                  |  35 +
+ src/VCX/Examples/Triangle/main.cpp               |  72 ++
+ src/VCX/Labs/0-GettingStarted/App.cpp            |  14 +
+ src/VCX/Labs/0-GettingStarted/App.h              |  33 +
+ src/VCX/Labs/0-GettingStarted/CaseBox.cpp        | 103 +++
+ src/VCX/Labs/0-GettingStarted/CaseBox.h          |  35 +
+ src/VCX/Labs/0-GettingStarted/CaseFixed.cpp      |  85 +++
+ src/VCX/Labs/0-GettingStarted/CaseFixed.h        |  29 +
+ src/VCX/Labs/0-GettingStarted/CaseFluid.cpp      | 140 ++++
+ src/VCX/Labs/0-GettingStarted/CaseFluid.h        |  59 ++
+ src/VCX/Labs/0-GettingStarted/CaseMassSpring.cpp | 104 +++
+ src/VCX/Labs/0-GettingStarted/CaseMassSpring.h   |  40 ++
+ src/VCX/Labs/0-GettingStarted/CaseResizable.cpp  |  55 ++
+ src/VCX/Labs/0-GettingStarted/CaseResizable.h    |  28 +
+ src/VCX/Labs/0-GettingStarted/FluidSimulator.h   |  25 +
+ src/VCX/Labs/0-GettingStarted/MassSpringSystem.h | 110 +++
+ src/VCX/Labs/0-GettingStarted/main.cpp           |  13 +
+ src/VCX/Labs/1-RigidBody/main.cpp                |   5 +
+ src/VCX/Labs/2-FluidSimulation/FluidSimulator.h  | 169 +++++
+ src/VCX/Labs/2-FluidSimulation/main.cpp          |   5 +
+ src/VCX/Labs/3-FEM/main.cpp                      |   5 +
+ src/VCX/Labs/Common/FlyCameraManager.cpp         | 131 ++++
+ src/VCX/Labs/Common/FlyCameraManager.h           |  66 ++
+ src/VCX/Labs/Common/ICase.h                      |  29 +
+ src/VCX/Labs/Common/ImGuiHelper.cpp              |  76 ++
+ src/VCX/Labs/Common/ImGuiHelper.h                |  26 +
+ src/VCX/Labs/Common/ImageRGB.cpp                 |  42 ++
+ src/VCX/Labs/Common/ImageRGB.h                   |  13 +
+ src/VCX/Labs/Common/OrbitCameraManager.cpp       | 193 +++++
+ src/VCX/Labs/Common/OrbitCameraManager.h         |  74 ++
+ src/VCX/Labs/Common/UI.cpp                       | 326 +++++++++
+ src/VCX/Labs/Common/UI.h                         |  68 ++
+ src/VCX/Labs/Scene/Content.cpp                   |  76 ++
+ src/VCX/Labs/Scene/Content.h                     |  12 +
+ src/VCX/Labs/Scene/SceneObject.cpp               | 157 ++++
+ src/VCX/Labs/Scene/SceneObject.h                 |  77 ++
+ xmake.lua                                        | 140 ++++
+ 102 files changed, 9159 insertions(+)
