@@ -133,6 +133,15 @@ def load_3dgs_ply(path: str, max_particles: int | None = None) -> GaussianHostDa
 
     mass = np.ones((n,), dtype=np.float32)
     volume = np.maximum(np.linalg.det(base_covariance), 1e-12).astype(np.float32)
+    material_id = column("material_id", 0.0).astype(np.int32)
+    pinned = column("pinned", 0.0).astype(np.int32)
+    density = column("density", 1000.0).astype(np.float32)
+    youngs_modulus = column("youngs_modulus", 2.0e4).astype(np.float32)
+    poisson_ratio = column("poisson_ratio", 0.30).astype(np.float32)
+    if "mass" in prop_index:
+        mass = column("mass", 1.0).astype(np.float32)
+    if "volume" in prop_index:
+        volume = column("volume", 1e-6).astype(np.float32)
 
     return GaussianHostData(
         position=position,
@@ -141,4 +150,9 @@ def load_3dgs_ply(path: str, max_particles: int | None = None) -> GaussianHostDa
         sh_coefficients=sh_coefficients,
         mass=mass,
         volume=volume,
+        material_id=material_id,
+        density=density,
+        youngs_modulus=youngs_modulus,
+        poisson_ratio=poisson_ratio,
+        pinned=pinned,
     )

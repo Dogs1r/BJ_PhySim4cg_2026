@@ -1,5 +1,6 @@
 import numpy as np
 import taichi as ti
+import math
 
 from .config import CameraConfig, RenderConfig
 from .particles import GaussianParticleSet
@@ -28,6 +29,9 @@ class GaussianRenderer:
         self.width = camera.width
         self.height = camera.height
         self.max_particles = render.max_particles
+        pitch = math.radians(camera.pitch_degrees)
+        self.pitch_cos = float(math.cos(pitch))
+        self.pitch_sin = float(math.sin(pitch))
 
         self.color = ti.Vector.field(3, dtype=ti.f32, shape=(self.width, self.height))
         self.transmittance = ti.field(dtype=ti.f32, shape=(self.width, self.height))
@@ -43,12 +47,28 @@ class GaussianRenderer:
     @ti.kernel
     def clear(self):
         for i, j in self.color:
-            self.color[i, j] = ti.Vector(
-                [self.render.background_r, self.render.background_g, self.render.background_b]
-            )
+            self.color[i, j] = ti.Vector([0.0, 0.0, 0.0])
             # transmittance 表示当前像素还剩多少背景光能穿过，初始为 1。
             self.transmittance[i, j] = 1.0
             self.image_u8[i, j] = ti.cast(ti.Vector([0, 0, 0]), ti.u8)
+
+    @ti.func
+    def _world_to_camera(self, pos: ti.types.vector(3, ti.f32)) -> ti.types.vector(3, ti.f32):
+        # 绕 x 轴做简单俯仰，让水平布料的下垂在画面中可见。
+        y = self.pitch_cos * pos.y - self.pitch_sin * pos.z
+        z = self.pitch_sin * pos.y + self.pitch_cos * pos.z + self.camera.camera_z
+        return ti.Vector([pos.x, y, z])
+
+    @ti.func
+    def _covariance_to_camera(self, cov: ti.types.matrix(3, 3, ti.f32)) -> ti.types.matrix(3, 3, ti.f32):
+        r = ti.Matrix(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, self.pitch_cos, -self.pitch_sin],
+                [0.0, self.pitch_sin, self.pitch_cos],
+            ]
+        )
+        return r @ cov @ r.transpose()
 
     @ti.func
     def _evaluate_sh(self, p: ti.i32, view_dir: ti.types.vector(3, ti.f32)) -> ti.types.vector(3, ti.f32):
@@ -75,21 +95,22 @@ class GaussianRenderer:
 
         for p in range(self.particles.count[None]):
             pos = self.particles.position[p]
-            z = pos.z + self.camera.camera_z
+            cam = self._world_to_camera(pos)
+            z = cam.z
             self.visible[p] = 0
             self.depth[p] = z
 
             if z > self.camera.near and z < self.camera.far:
                 f = self.camera.focal_length
-                u = f * pos.x / z + self.width * 0.5
-                v = f * pos.y / z + self.height * 0.5
+                u = f * cam.x / z + self.width * 0.5
+                v = f * cam.y / z + self.height * 0.5
 
-                cov3 = self.particles.current_covariance[p]
+                cov3 = self._covariance_to_camera(self.particles.current_covariance[p])
 
                 j00 = f / z
-                j02 = -f * pos.x / (z * z)
+                j02 = -f * cam.x / (z * z)
                 j11 = f / z
-                j12 = -f * pos.y / (z * z)
+                j12 = -f * cam.y / (z * z)
 
                 # 展开 Sigma_2d = J Sigma_3d J^T，只保留 2x2。
                 a = (
@@ -109,9 +130,10 @@ class GaussianRenderer:
                     + j12 * j12 * cov3[2, 2]
                 )
 
-                # 与 3DGS 实现类似，加一个低通项，避免过小 Gaussian 造成数值问题。
-                a += 0.3
-                c += 0.3
+                # 低通项用于避免过小 Gaussian 造成数值问题。
+                # 数值越大画面越平滑但越容易糊；数值越小越锐利但更容易闪烁/破碎。
+                a += self.render.low_pass_variance
+                c += self.render.low_pass_variance
                 det = a * c - b * b
 
                 if det > 1e-8:
@@ -136,7 +158,8 @@ class GaussianRenderer:
             conic = self.conic[p]
             pos = self.particles.position[p]
             z = self.depth[p]
-            view_dir = ti.Vector([-pos.x, -pos.y, -z]).normalized()
+            cam = self._world_to_camera(pos)
+            view_dir = ti.Vector([-cam.x, -cam.y, -cam.z]).normalized()
             rgb = self._evaluate_sh(p, view_dir)
 
             min_x = ti.max(0, ti.cast(ti.floor(center.x), ti.i32) - radius)
@@ -149,7 +172,7 @@ class GaussianRenderer:
                 power = -0.5 * (conic.x * d.x * d.x + 2.0 * conic.y * d.x * d.y + conic.z * d.y * d.y)
                 if power > -16.0:
                     alpha = ti.min(0.99, self.particles.opacity[p] * ti.exp(power))
-                    if alpha > 1.0 / 255.0:
+                    if alpha > self.render.alpha_threshold:
                         # 近到远合成：C += T * alpha * color, T *= (1-alpha)。
                         t = self.transmittance[i, j]
                         self.color[i, j] += t * alpha * rgb
@@ -158,7 +181,9 @@ class GaussianRenderer:
     @ti.kernel
     def tonemap(self):
         for i, j in self.color:
-            rgb = ti.max(ti.Vector([0.0, 0.0, 0.0]), ti.min(self.color[i, j], ti.Vector([1.0, 1.0, 1.0])))
+            bg = ti.Vector([self.render.background_r, self.render.background_g, self.render.background_b])
+            rgb = self.color[i, j] + self.transmittance[i, j] * bg
+            rgb = ti.max(ti.Vector([0.0, 0.0, 0.0]), ti.min(rgb, ti.Vector([1.0, 1.0, 1.0])))
             self.image_u8[i, j] = ti.cast(rgb * 255.0, ti.u8)
 
     def render_frame(self) -> np.ndarray:
@@ -176,6 +201,11 @@ class GaussianRenderer:
         self.tonemap()
         # Taichi field 维度是 [x, y]，保存图像时转为 [y, x, channel]。
         return np.transpose(self.image_u8.to_numpy(), (1, 0, 2))
+
+    def render_frame_float(self) -> np.ndarray:
+        """返回 [0, 1] float 图像，适合 ti.GUI 实时显示。"""
+
+        return self.render_frame().astype(np.float32) / 255.0
 
 
 def save_ppm(path: str, image: np.ndarray) -> None:

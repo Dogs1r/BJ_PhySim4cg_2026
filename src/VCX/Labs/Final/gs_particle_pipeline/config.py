@@ -9,6 +9,7 @@ class CameraConfig:
     height: int = 600
     focal_length: float = 620.0
     camera_z: float = 3.2
+    pitch_degrees: float = 0.0
     near: float = 0.05
     far: float = 20.0
 
@@ -19,6 +20,8 @@ class RenderConfig:
 
     max_particles: int = 4096
     tile_radius_scale: float = 3.0
+    low_pass_variance: float = 0.005
+    alpha_threshold: float = 0.001
     background_r: float = 0.02
     background_g: float = 0.025
     background_b: float = 0.03
