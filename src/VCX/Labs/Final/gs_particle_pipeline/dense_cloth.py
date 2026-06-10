@@ -13,8 +13,8 @@ class DenseClothConfig:
     sim_nx: int
     sim_ny: int
     upsample: int = 2
-    splat_scale: float = 0.10
-    opacity: float = 0.45
+    splat_scale: float = 0.80
+    opacity: float = 0.85
 
 
 def make_dense_cloth_host_data(source: GaussianHostData, config: DenseClothConfig) -> GaussianHostData:
@@ -34,7 +34,7 @@ def make_dense_cloth_host_data(source: GaussianHostData, config: DenseClothConfi
         raise ValueError("源 PLY 粒子数少于 sim_nx * sim_ny，无法生成密集布料渲染层")
 
     position = np.zeros((render_count, 3), dtype=np.float32)
-    sh = np.zeros((render_count, 4, 3), dtype=np.float32)
+    sh = np.zeros((render_count, 16, 3), dtype=np.float32)
     opacity = np.full((render_count,), config.opacity, dtype=np.float32)
 
     def sim_idx(i: int, j: int) -> int:
@@ -70,7 +70,8 @@ def make_dense_cloth_host_data(source: GaussianHostData, config: DenseClothConfi
             sh[idx] = sum(weights[k] * source.sh_coefficients[ids[k]] for k in range(4))
             idx += 1
 
-    # 以渲染网格间距设置更小的 Gaussian，避免“彩球”和强模糊。
+    # 以渲染网格间距设置 Gaussian。splat_scale 是 dense spacing 的覆盖比例；
+    # 过小会在官方 GS rasterizer 中变成亚像素亮点，无法连成布料面。
     spacing_x = np.linalg.norm(source.position[sim_idx(1, 0)] - source.position[sim_idx(0, 0)]) / config.upsample
     spacing_y = np.linalg.norm(source.position[sim_idx(0, 1)] - source.position[sim_idx(0, 0)]) / config.upsample
     sigma = max(min(spacing_x, spacing_y) * config.splat_scale, 1e-4)
@@ -78,11 +79,16 @@ def make_dense_cloth_host_data(source: GaussianHostData, config: DenseClothConfi
 
     mass = np.ones((render_count,), dtype=np.float32)
     volume = np.full((render_count,), sigma * sigma * sigma, dtype=np.float32)
+    scale = np.full((render_count, 3), sigma, dtype=np.float32)
+    rotation = np.zeros((render_count, 4), dtype=np.float32)
+    rotation[:, 0] = 1.0
     return GaussianHostData(
         position=position,
         base_covariance=covariance,
         opacity=opacity,
         sh_coefficients=sh,
+        scale=scale,
+        rotation=rotation,
         mass=mass,
         volume=volume,
     )

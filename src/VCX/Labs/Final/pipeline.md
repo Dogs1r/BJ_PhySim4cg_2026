@@ -52,12 +52,16 @@ assets/elastic_sheet.ply
 
 ```text
 gs_particle_pipeline/config.py
+gs_particle_pipeline/camera.py
 gs_particle_pipeline/particles.py
 gs_particle_pipeline/ply_loader.py
 gs_particle_pipeline/physics_interface.py
 gs_particle_pipeline/elastic_mpm.py
 gs_particle_pipeline/mass_spring.py
 gs_particle_pipeline/dense_cloth.py
+gs_particle_pipeline/cuda_rasterizer_adapter.py
+gs_particle_pipeline/cuda_renderer.py
+gs_particle_pipeline/render_backend.py
 gs_particle_pipeline/renderer.py
 ```
 
@@ -85,8 +89,25 @@ simulate.py
   -> sim_particles = GaussianParticleSet.load_from_host()
   -> PhysicsBridge(mode="elastic" or "mass-spring")
   -> optional render_particles = DenseClothRenderLayer(sim_particles)
-  -> GaussianRenderer(render_particles or sim_particles)
+  -> create_renderer(args.renderer, render_particles or sim_particles)
   -> GUI / save_ppm / ffmpeg
+```
+
+默认官方 CUDA 3DGS rasterizer 数据流：
+
+```text
+render_particles + GaussianCamera
+  -> build_cuda_rasterizer_payload()
+  -> torch CUDA tensors
+  -> diff_gaussian_rasterization.GaussianRasterizer
+```
+
+Taichi reference 数据流：
+
+```text
+render_particles + CameraConfig
+  -> GaussianRenderer
+  -> Taichi teaching splatting
 ```
 
 逐帧循环：
@@ -127,9 +148,12 @@ for frame in frames:
 --particles    -> RenderConfig.max_particles
 --radius-scale -> RenderConfig.tile_radius_scale
 --low-pass     -> RenderConfig.low_pass_variance
+--renderer     -> create_renderer("gs" or "reference")
+--gs-device    -> CudaGaussianRenderer torch device
+--gs-use-covariance -> 使用 current_covariance 作为 cov3D_precomp
 --dense-render -> 启用 Mass-Spring 粗物理网格到密集渲染 Gaussian 的插值层
 --render-upsample    -> DenseClothConfig.upsample
---render-splat-scale -> DenseClothConfig.splat_scale
+--render-splat-scale -> DenseClothConfig.splat_scale，占 dense 网格间距的比例
 --render-opacity     -> DenseClothConfig.opacity
 ```
 
@@ -145,6 +169,15 @@ for frame in frames:
 --spring-damping          -> MassSpringConfig.damping
 --spring-gravity          -> MassSpringConfig.gravity
 ```
+
+如果命令行没有显式传入 `--dt` 和 `--substeps`，`simulate.py` 会按物理模式选择稳定默认值：
+
+```text
+mode="mass-spring": dt=0.002,  substeps=4
+mode="elastic":     dt=0.0005, substeps=10
+```
+
+原因是当前 Mass-Spring 是显式求解器，通用的 `dt=1/60` 对当前弹簧刚度会在数帧内发散。
 
 ### 输出参数
 
@@ -183,6 +216,13 @@ f_dc_0, f_dc_1, f_dc_2
 f_rest_*
 ```
 
+当前 PLY 顶点表支持：
+
+```text
+format ascii
+format binary_little_endian
+```
+
 支持物理字段：
 
 ```text
@@ -202,8 +242,11 @@ position = [x, y, z]
 opacity = sigmoid(opacity)
 scale = exp(scale_*)
 R = quaternion_to_rotation(rot_*)
+scale = exp(scale_*)
+rotation = [rot_0, rot_1, rot_2, rot_3]
 base_covariance = R * diag(scale^2) * R^T
-sh_coefficients[0] = clamp(0.5 + SH_C0 * f_dc)
+sh_coefficients[0] = f_dc
+sh_coefficients[1..15] = f_rest_0..44
 ```
 
 ## 6. 共享数据接口
@@ -235,6 +278,8 @@ youngs_modulus
 poisson_ratio
 base_covariance
 current_covariance
+scale
+rotation
 opacity
 sh_coefficients
 ```
@@ -249,7 +294,7 @@ deformation_gradient
 current_covariance
 ```
 
-渲染模块读：
+Taichi reference 渲染模块读：
 
 ```text
 position
@@ -257,6 +302,19 @@ current_covariance
 opacity
 sh_coefficients
 ```
+
+CUDA rasterizer adapter 读：
+
+```text
+position
+opacity
+scale
+rotation
+sh_coefficients[0..15]
+current_covariance
+```
+
+其中 `current_covariance` 用于后续选择 `cov3D_precomp` 路径；`scale/rotation` 用于官方 renderer 默认路径。
 
 ## 7. 密集布料渲染层
 
@@ -348,7 +406,36 @@ mu = E / (2 * (1 + nu))
 lambda = E * nu / ((1 + nu) * (1 - 2 * nu))
 ```
 
-## 9. Gaussian 渲染链路
+## 9. 可选渲染后端
+
+文件：
+
+```text
+gs_particle_pipeline/render_backend.py
+```
+
+接口：
+
+```text
+create_renderer(backend, particles, reference_camera, gaussian_camera, render)
+```
+
+当前后端：
+
+```text
+backend="gs"        默认路径，复用官方 CUDA 3DGS rasterizer
+backend="reference" Taichi 教学 renderer，用于 CPU/调试/对照
+```
+
+`simulate.py` 的主循环不关心具体后端，只要求 renderer 提供：
+
+```text
+render_frame() -> uint8 image [height, width, 3]
+```
+
+这保证仿真后的粒子状态可以直接传给不同渲染管线。
+
+## 10. Taichi Reference Gaussian 渲染链路
 
 文件：
 
@@ -386,7 +473,64 @@ color += T * alpha * rgb
 T *= 1 - alpha
 ```
 
-## 10. 当前运行命令
+## 11. 官方 CUDA 3DGS 接入边界
+
+参考文件：
+
+```text
+D:\git_repo\gaussian-splatting\gaussian_renderer\__init__.py
+D:\git_repo\gaussian-splatting\gaussian_renderer\network_gui.py
+```
+
+当前已预留的接口：
+
+```text
+gs_particle_pipeline/camera.py
+  -> GaussianCamera.from_config()
+  -> image_width / image_height
+  -> fov_x / fov_y
+  -> world_view_transform
+  -> projection_matrix
+  -> full_proj_transform
+  -> camera_center
+
+gs_particle_pipeline/cuda_rasterizer_adapter.py
+  -> build_cuda_rasterizer_payload()
+  -> means3D / opacities / shs / scales / rotations
+  -> optional cov3D_precomp
+
+gs_particle_pipeline/cuda_renderer.py
+  -> CudaGaussianRenderer
+  -> GaussianRasterizationSettings
+  -> GaussianRasterizer
+```
+
+后续真正接入 CUDA 时，目标是把 payload 转成：
+
+```text
+means3D         -> pc.get_xyz
+opacities       -> pc.get_opacity
+scales          -> pc.get_scaling
+rotations       -> pc.get_rotation
+shs             -> pc.get_features
+camera matrices -> viewpoint_camera
+```
+
+然后调用官方 `GaussianRasterizer`。本轮没有引入 torch，也没有编译 `diff_gaussian_rasterization`。
+
+当前设计已经在代码层尝试运行时导入 `torch` 和 `diff_gaussian_rasterization`。如果本机没有 CUDA 环境，使用：
+
+```powershell
+python simulate.py --renderer reference ...
+```
+
+后续可以在单独虚拟环境或云服务器安装官方依赖后运行：
+
+```powershell
+python simulate.py --renderer gs ...
+```
+
+## 12. 当前运行命令
 
 生成测试 PLY：
 
@@ -398,32 +542,32 @@ python make_elastic_sheet.py --output assets/elastic_sheet.ply
 运行动态 Gaussian 渲染：
 
 ```powershell
-python simulate.py --cpu --ply assets/elastic_bar.ply --particles 300 --frames 30 --dt 0.0005 --substeps 10 --camera-z 3.0 --focal-length 1100 --profile
+python simulate.py --renderer reference --cpu --ply assets/elastic_bar.ply --particles 300 --frames 30 --dt 0.0005 --substeps 10 --camera-z 3.0 --focal-length 1100 --profile
 ```
 
 运行 432 粒子弹性布片：
 
 ```powershell
-python simulate.py --cpu --ply assets/elastic_sheet.ply --particles 432 --frames 30 --dt 0.0005 --substeps 8 --camera-z 3.0 --focal-length 950 --profile
+python simulate.py --renderer reference --cpu --ply assets/elastic_sheet.ply --particles 432 --frames 30 --dt 0.0005 --substeps 8 --camera-z 3.0 --focal-length 950 --profile
 ```
 
 运行接近 lab0 MassSpring 的布片：
 
 ```powershell
 python make_elastic_sheet.py --output assets/mass_spring_sheet.ply --nx 22 --ny 22 --pin-mode top-corners --splat-scale 0.08
-python simulate.py --cpu --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484 --frames 120 --dt 0.002 --substeps 4 --spring-nx 22 --spring-ny 22 --camera-z 3.0 --focal-length 1100 --pitch -28 --low-pass 0.003 --profile
+python simulate.py --renderer reference --cpu --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484 --frames 120 --dt 0.002 --substeps 4 --spring-nx 22 --spring-ny 22 --camera-z 3.0 --focal-length 1100 --pitch -28 --low-pass 0.003 --profile
 ```
 
 运行密集渲染版 MassSpring 布片：
 
 ```powershell
-python simulate.py --cpu --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484 --dense-render --render-upsample 2 --render-splat-scale 0.10 --render-opacity 0.45 --frames 120 --dt 0.002 --substeps 4 --spring-nx 22 --spring-ny 22 --camera-z 3.0 --focal-length 1100 --pitch -28 --low-pass 0.003 --profile
+python simulate.py --renderer reference --cpu --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484 --dense-render --render-upsample 2 --render-splat-scale 0.80 --render-opacity 0.85 --frames 120 --dt 0.002 --substeps 4 --spring-nx 22 --spring-ny 22 --camera-z 3.0 --focal-length 1100 --pitch -28 --low-pass 0.003 --profile
 ```
 
 增大 Mass-Spring 重力：
 
 ```powershell
-python simulate.py --cpu --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484 --dense-render --render-upsample 2 --spring-gravity 4.0 --frames 120 --dt 0.002 --substeps 4 --spring-nx 22 --spring-ny 22 --camera-z 3.0 --focal-length 1100 --pitch -28 --low-pass 0.003 --profile
+python simulate.py --renderer reference --cpu --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484 --dense-render --render-upsample 2 --spring-gravity 4.0 --frames 120 --dt 0.002 --substeps 4 --spring-nx 22 --spring-ny 22 --camera-z 3.0 --focal-length 1100 --pitch -28 --low-pass 0.003 --profile
 ```
 
 导出视频：
@@ -431,3 +575,150 @@ python simulate.py --cpu --mode mass-spring --ply assets/mass_spring_sheet.ply -
 ```powershell
 python simulate.py --cpu --no-window --ply assets/elastic_bar.ply --particles 300 --frames 120 --dt 0.0005 --substeps 10 --video outputs/elastic_bar.mp4
 ```
+## 13. CUDA GS 布料诊断命令
+
+当 `--renderer gs` 的结果和 `--renderer reference` 明显不一致时，先用下面命令检查 CUDA rasterizer 实际收到的粒子数、投影范围和 Gaussian 尺寸：
+
+```powershell
+python simulate.py --renderer gs --no-window --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484 --dense-render --render-upsample 10 --render-splat-scale 0.80 --render-opacity 0.85 --frames 1 --spring-nx 22 --spring-ny 22 --width 1280 --height 720 --camera-z 3.0 --focal-length 1100 --pitch -28 --profile --diagnose-state --diagnose-render
+```
+
+需要重点确认：
+
+```text
+render_particles=44521, dense=True
+[diagnose-render] n=44521 ... visible_ndc=...
+```
+
+## 14. 布料 GS 仿真阶段性总结
+
+当前 Mass-Spring 布料链路已经跑通：
+
+```text
+22 x 22 Mass-Spring physics nodes
+  -> dense render layer, for example 211 x 211 = 44521 Gaussians
+  -> official CUDA GS rasterizer
+  -> continuous cloth-like rendered surface
+  -> frame sequence / video export
+```
+
+本阶段修复过的关键问题：
+
+```text
+1. Mass-Spring 默认 dt/substeps 过大导致显式求解发散。
+2. 原始 484 粒子直接渲染只能看到彩色点阵，因此加入 dense render layer。
+3. CUDA GS projection matrix 需要保持官方 row-vector 约定，即 projection/world-view 都使用 transpose 后的矩阵。
+4. 布料测试 PLY 使用自生成 SH/scale，CUDA GS 路径建议用 --gs-color-mode rgb 解耦 SH 颜色解释。
+5. 为了让 dense Gaussian 连续成面，建议使用 --gs-scale-modifier 2.0 左右。
+6. CUDA GS 图像上下方向与 reference 不一致时，使用 --gs-flip-y，而不是移除 projection transpose。
+```
+
+当前推荐的 CUDA GS 布料视频命令：
+
+```bash
+python simulate.py --renderer gs --no-window --mode mass-spring \
+  --ply assets/mass_spring_sheet.ply \
+  --particles 484 \
+  --dense-render \
+  --render-upsample 10 \
+  --render-splat-scale 0.80 \
+  --render-opacity 0.85 \
+  --gs-scale-modifier 2.0 \
+  --gs-color-mode rgb \
+  --gs-flip-y \
+  --frames 120 \
+  --video outputs/cloth_gs.mp4 \
+  --spring-nx 22 \
+  --spring-ny 22 \
+  --width 1280 \
+  --height 720 \
+  --camera-z 3.0 \
+  --focal-length 1100 \
+  --pitch -28 \
+  --profile
+```
+
+参数含义：
+
+```text
+--dense-render         coarse physics nodes -> dense visual Gaussians
+--render-upsample      dense visual grid subdivision
+--render-splat-scale   Gaussian scale relative to dense spacing
+--gs-scale-modifier    official rasterizer global scale multiplier
+--gs-color-mode rgb    use precomputed RGB for synthetic cloth tests
+--gs-flip-y            fix vertical image convention mismatch
+```
+
+## 15. 扫描物体到 GS PLY 再做弹性体仿真的规划
+
+目标链路：
+
+```text
+real object scan / video capture
+  -> COLMAP camera reconstruction
+  -> train 3D Gaussian Splatting
+  -> exported point_cloud.ply
+  -> build physics representation
+  -> elastic simulation
+  -> render deformed Gaussian state with CUDA GS
+```
+
+需要注意：训练得到的 3DGS PLY 是视觉表示，不等价于物理离散体。它通常只覆盖可见表面，点的密度由视角和纹理决定，不包含体积网格、质量、材料、约束和碰撞信息。因此不能把任意 trained GS PLY 直接当作弹性体 MPM 粒子集使用。
+
+后续需要补的模块：
+
+```text
+1. GS PLY visual loader
+   读取真实 trained 3DGS 的 xyz / opacity / scale / rotation / SH。
+
+2. Physics proxy builder
+   从 GS 表面或额外 mesh/depth 数据构建物理代理：
+   - surface shell, for cloth/thin sheet
+   - tetrahedral/voxel particles, for volumetric elastic object
+   - optional cages or embedded deformation graph
+
+3. Visual-to-physics binding
+   建立 visual Gaussian 到 physics proxy 的绑定关系：
+   - nearest particle
+   - barycentric coordinate in tet/triangle
+   - skinning weights
+   - deformation graph weights
+
+4. Elastic solver
+   对体积物体使用 MPM/FEM/PBD 等弹性体求解器。
+
+5. Deformed GS update
+   每帧由 physics proxy 更新 Gaussian position，并按局部 deformation gradient 更新 covariance/scale/rotation。
+```
+
+当前已有的 Mass-Spring 不是通用物体弹性体求解器。它专门适合 cloth/sheet：
+
+```text
+2D grid topology
+springs between neighbor/bending/shear nodes
+pinned corners or rows
+explicit integration
+```
+
+对扫描得到的一般三维物体，应优先使用：
+
+```text
+volumetric MPM    适合大变形、拓扑简单、粒子法教学扩展
+tet FEM           适合弹性体形变更准确，但需要网格化和求解线性系统
+PBD/XPBD          适合稳定实时交互，物理精度较低但工程上直接
+embedded graph    适合把高密 GS 绑定到低维控制节点
+```
+
+推荐下一阶段先做最小可行版本：
+
+```text
+trained/static GS PLY
+  + manually generated low-res elastic proxy, for example voxel/tet particles
+  + nearest-neighbor or kNN binding from each Gaussian to proxy particles
+  + proxy simulation updates Gaussian positions
+  + CUDA GS renders updated Gaussians
+```
+
+这样可以避免一开始就同时解决“真实扫描、GS 训练、几何重建、体积网格化、弹性仿真、高质量绑定”五个困难问题。
+
+如果 `visible_ndc` 很小，优先检查相机参数；如果 `scale_minmax` 很小，优先增大 `--render-splat-scale`。CUDA GS 相机矩阵采用官方 gaussian-splatting 的 row-vector 约定，`projection_matrix` 和 `world_view_transform` 都需要 transpose 后再计算 `full_proj_transform`。

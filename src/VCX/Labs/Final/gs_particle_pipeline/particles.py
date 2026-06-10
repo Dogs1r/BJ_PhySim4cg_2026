@@ -16,6 +16,8 @@ class GaussianHostData:
     base_covariance: np.ndarray
     opacity: np.ndarray
     sh_coefficients: np.ndarray
+    scale: np.ndarray
+    rotation: np.ndarray
     mass: np.ndarray
     volume: np.ndarray
     material_id: np.ndarray | None = None
@@ -60,9 +62,16 @@ class GaussianParticleSet:
         self.current_covariance = ti.Matrix.field(3, 3, dtype=ti.f32, shape=max_particles)
         self.opacity = ti.field(dtype=ti.f32, shape=max_particles)
 
-        # 简化 SH：保留 4 个三通道系数，分别对应常数项和一阶方向项。
+        # 官方 3DGS rasterizer 需要 scale/rotation 或 cov3D_precomp。
+        # current_covariance 继续服务教学 renderer 和物理变形接口。
+        self.scale = ti.Vector.field(3, dtype=ti.f32, shape=max_particles)
+        self.rotation = ti.Vector.field(4, dtype=ti.f32, shape=max_particles)
+
+        # 完整三阶 SH：16 个三通道系数。当前教学 renderer 只使用前 4 项；
+        # 后续 CUDA rasterizer 可直接使用完整 features。
         # sh_coefficients[p, k] 是第 p 个 Gaussian 的第 k 个 SH RGB 系数。
-        self.sh_coefficients = ti.Vector.field(3, dtype=ti.f32, shape=(max_particles, 4))
+        self.max_sh_coefficients = 16
+        self.sh_coefficients = ti.Vector.field(3, dtype=ti.f32, shape=(max_particles, self.max_sh_coefficients))
 
     def load_from_host(self, data: GaussianHostData) -> None:
         n = int(data.position.shape[0])
@@ -73,6 +82,9 @@ class GaussianParticleSet:
         position = np.zeros((self.max_particles, 3), dtype=np.float32)
         covariance = np.zeros((self.max_particles, 3, 3), dtype=np.float32)
         opacity = np.zeros((self.max_particles,), dtype=np.float32)
+        scale = np.full((self.max_particles, 3), 0.01, dtype=np.float32)
+        rotation = np.zeros((self.max_particles, 4), dtype=np.float32)
+        rotation[:, 0] = 1.0
         mass = np.ones((self.max_particles,), dtype=np.float32)
         volume = np.zeros((self.max_particles,), dtype=np.float32)
         material_id = np.zeros((self.max_particles,), dtype=np.int32)
@@ -84,6 +96,8 @@ class GaussianParticleSet:
         position[:n] = data.position.astype(np.float32)
         covariance[:n] = data.base_covariance.astype(np.float32)
         opacity[:n] = data.opacity.astype(np.float32)
+        scale[:n] = data.scale.astype(np.float32)
+        rotation[:n] = data.rotation.astype(np.float32)
         mass[:n] = data.mass.astype(np.float32)
         volume[:n] = data.volume.astype(np.float32)
         if data.material_id is not None:
@@ -102,6 +116,8 @@ class GaussianParticleSet:
         self.base_covariance.from_numpy(covariance)
         self.current_covariance.from_numpy(covariance)
         self.opacity.from_numpy(opacity)
+        self.scale.from_numpy(scale)
+        self.rotation.from_numpy(rotation)
         self.mass.from_numpy(mass)
         self.volume.from_numpy(volume)
         self.material_id.from_numpy(material_id)
@@ -116,8 +132,9 @@ class GaussianParticleSet:
         self.affine_C.from_numpy(np.zeros((self.max_particles, 3, 3), dtype=np.float32))
         self.deformation_gradient.from_numpy(identity_f)
 
-        sh_full = np.zeros((self.max_particles, 4, 3), dtype=np.float32)
-        sh_full[:n] = data.sh_coefficients.astype(np.float32)
+        sh_full = np.zeros((self.max_particles, self.max_sh_coefficients, 3), dtype=np.float32)
+        coeff_count = min(data.sh_coefficients.shape[1], self.max_sh_coefficients)
+        sh_full[:n, :coeff_count] = data.sh_coefficients[:, :coeff_count].astype(np.float32)
         self.sh_coefficients.from_numpy(sh_full)
 
     @ti.kernel

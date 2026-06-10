@@ -7,13 +7,16 @@ import numpy as np
 import taichi as ti
 
 from gs_particle_pipeline.config import CameraConfig, RenderConfig
+from gs_particle_pipeline.camera import GaussianCamera
+from gs_particle_pipeline.cuda_renderer import CudaRendererUnavailable
 from gs_particle_pipeline.dense_cloth import DenseClothConfig, DenseClothRenderLayer, make_dense_cloth_host_data
 from gs_particle_pipeline.elastic_mpm import ElasticMPMConfig
 from gs_particle_pipeline.mass_spring import MassSpringConfig
 from gs_particle_pipeline.particles import GaussianParticleSet
 from gs_particle_pipeline.physics_interface import PhysicsBridge
 from gs_particle_pipeline.ply_loader import load_3dgs_ply
-from gs_particle_pipeline.renderer import GaussianRenderer, save_ppm
+from gs_particle_pipeline.render_backend import create_renderer
+from gs_particle_pipeline.renderer import save_ppm
 
 
 def parse_args():
@@ -27,10 +30,13 @@ def parse_args():
     parser.add_argument("--pitch", type=float, default=-28.0, help="相机俯仰角，负值从上方观察布料")
     parser.add_argument("--low-pass", type=float, default=0.005, help="2D covariance 低通项，越小越锐利")
     parser.add_argument("--radius-scale", type=float, default=3.0, help="Gaussian 屏幕影响半径倍数")
+    parser.add_argument("--renderer", choices=["gs", "reference"], default="gs", help="渲染后端：gs=官方 CUDA 3DGS，reference=Taichi 教学参考实现")
+    parser.add_argument("--gs-device", default="cuda", help="官方 GS 后端使用的 torch device")
+    parser.add_argument("--gs-use-covariance", action="store_true", help="官方 GS 后端使用 current_covariance 作为 cov3D_precomp")
     parser.add_argument("--fps", type=int, default=30, help="导出视频帧率")
     parser.add_argument("--frames", type=int, default=150, help="最多渲染帧数")
-    parser.add_argument("--dt", type=float, default=1.0 / 60.0, help="物理子步长")
-    parser.add_argument("--substeps", type=int, default=2, help="每个渲染帧包含的物理子步数")
+    parser.add_argument("--dt", type=float, default=None, help="物理子步长；默认按 --mode 选择稳定值")
+    parser.add_argument("--substeps", type=int, default=None, help="每个渲染帧包含的物理子步数；默认按 --mode 选择稳定值")
     parser.add_argument("--mode", choices=["elastic", "mass-spring"], default="elastic", help="物理接口模式")
     parser.add_argument("--mpm-grid", type=int, default=32, help="弹性 MPM 网格分辨率")
     parser.add_argument("--gravity", type=float, default=-9.8, help="弹性 MPM 重力加速度")
@@ -49,9 +55,18 @@ def parse_args():
     parser.add_argument("--diagnose-state", action="store_true", help="打印粒子包围盒和速度，检查物理是否在动")
     parser.add_argument("--dense-render", action="store_true", help="为 Mass-Spring 布料生成密集渲染 Gaussian")
     parser.add_argument("--render-upsample", type=int, default=2, help="密集渲染层相对物理网格的细分倍数")
-    parser.add_argument("--render-splat-scale", type=float, default=0.10, help="密集渲染 Gaussian 尺寸")
-    parser.add_argument("--render-opacity", type=float, default=0.45, help="密集渲染 Gaussian 不透明度")
-    return parser.parse_args()
+    parser.add_argument("--render-splat-scale", type=float, default=0.80, help="密集渲染 Gaussian 尺寸，占 dense 网格间距的比例")
+    parser.add_argument("--render-opacity", type=float, default=0.85, help="密集渲染 Gaussian 不透明度")
+    parser.add_argument("--diagnose-render", action="store_true", help="Print CUDA GS renderer particle count, screen bounds, and scale ranges")
+    parser.add_argument("--gs-scale-modifier", type=float, default=1.0, help="CUDA GS rasterizer scale_modifier")
+    parser.add_argument("--gs-color-mode", choices=["sh", "rgb"], default="sh", help="CUDA GS color path: sh or precomputed rgb")
+    parser.add_argument("--gs-flip-y", action="store_true", help="Flip CUDA GS projection vertically")
+    args = parser.parse_args()
+    if args.dt is None:
+        args.dt = 0.002 if args.mode == "mass-spring" else 0.0005
+    if args.substeps is None:
+        args.substeps = 4 if args.mode == "mass-spring" else 10
+    return args
 
 
 def build_pipeline(args):
@@ -62,6 +77,7 @@ def build_pipeline(args):
         camera_z=args.camera_z,
         pitch_degrees=args.pitch,
     )
+    gaussian_camera = GaussianCamera.from_config(camera, flip_y=args.gs_flip_y)
     render_capacity = args.particles
     if args.dense_render:
         render_capacity = ((args.spring_nx - 1) * args.render_upsample + 1) * ((args.spring_ny - 1) * args.render_upsample + 1)
@@ -105,8 +121,19 @@ def build_pipeline(args):
         elastic_config=elastic_config,
         mass_spring_config=mass_spring_config,
     )
-    renderer = GaussianRenderer(render_particles, camera, render)
-    return sim_particles, render_particles, physics, renderer, dense_layer
+    renderer = create_renderer(
+        args.renderer,
+        render_particles,
+        camera,
+        gaussian_camera,
+        render,
+        use_covariance=args.gs_use_covariance,
+        device=args.gs_device,
+        diagnose_render=args.diagnose_render,
+        scale_modifier=args.gs_scale_modifier,
+        color_mode=args.gs_color_mode,
+    )
+    return sim_particles, render_particles, physics, renderer, dense_layer, gaussian_camera
 
 
 def encode_video(frame_dir: str, video_path: str, fps: int) -> None:
@@ -132,13 +159,17 @@ def main():
     args = parse_args()
     ti.init(arch=ti.cpu if args.cpu else ti.gpu)
 
-    particles, render_particles, physics, renderer, dense_layer = build_pipeline(args)
+    try:
+        particles, render_particles, physics, renderer, dense_layer, gaussian_camera = build_pipeline(args)
+    except CudaRendererUnavailable as exc:
+        raise SystemExit(str(exc)) from exc
     print(
         "启动动态渲染: "
-        f"mode={args.mode}, render=gaussian, sim_particles={args.particles}, "
+        f"mode={args.mode}, renderer={args.renderer}, sim_particles={args.particles}, "
         f"render_particles={render_particles.count[None]}, dense={dense_layer is not None}, "
         f"frames={args.frames}, substeps={args.substeps}, dt={args.dt}, "
-        f"size={args.width}x{args.height}, cpu={args.cpu}",
+        f"size={args.width}x{args.height}, "
+        f"fov=({gaussian_camera.fov_x:.3f},{gaussian_camera.fov_y:.3f}), cpu={args.cpu}",
         flush=True,
     )
     frame_dir = args.save_frames

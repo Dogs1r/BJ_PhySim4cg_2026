@@ -771,3 +771,281 @@ python simulate.py --cpu --mode mass-spring --ply assets/mass_spring_sheet.ply -
 ### 当前结论
 
 本轮改善的是“粗物理节点到更密渲染 Gaussian”的中间表达，适合作为真正高密度 3DGS 接入前的过渡层。它没有改变当前 GaussianRenderer 的教学实现性质，也没有接入官方 CUDA 3DGS rasterizer。
+
+## 第 13 次改动：为官方 CUDA 3DGS rasterizer 接入预备数据和相机接口
+
+### 背景
+
+后续最终目标仍然是接入现有 CUDA 3DGS rasterizer，而不是长期维护当前教学版逐 Gaussian renderer。真正接入前，可以先完成不依赖 CUDA 编译的准备工作：
+
+- 保留完整 3DGS PLY 数据。
+- 提供官方风格相机矩阵。
+- 明确当前 Taichi 粒子数据到官方 rasterizer 输入的转换边界。
+
+参考文件：
+
+```text
+D:\git_repo\gaussian-splatting\gaussian_renderer\__init__.py
+D:\git_repo\gaussian-splatting\gaussian_renderer\network_gui.py
+```
+
+### 修改内容
+
+- `GaussianHostData` 新增：
+  - `scale`
+  - `rotation`
+- `GaussianParticleSet` 新增：
+  - `scale`
+  - `rotation`
+  - `16` 项 RGB SH 系数容量。
+- `ply_loader.py` 支持：
+  - `format ascii`
+  - `format binary_little_endian`
+  - `f_dc_0..2`
+  - `f_rest_0..44`
+- `ply_loader.py` 不再只把 DC 项提前转成 RGB，而是保留原始 SH 系数：
+
+```text
+sh_coefficients[0]    = f_dc
+sh_coefficients[1..15] = f_rest_0..44
+```
+
+- `renderer.py` 调整教学版 SH 评估：
+  - 使用 `0.5 + SH_C0 * f_dc` 的标准 DC 还原。
+  - 当前只评估到一阶 SH，但数据层已经保留三阶 SH。
+- 新增 `gs_particle_pipeline/camera.py`：
+  - `GaussianCamera`
+  - `focal_to_fov()`
+  - `get_projection_matrix()`
+  - `world_view_from_simple_camera()`
+- 新增 `gs_particle_pipeline/cuda_rasterizer_adapter.py`：
+  - `build_cuda_rasterizer_payload()`
+  - 导出 `means3D / opacities / shs / scales / rotations`
+  - 可选导出 `cov3D_precomp`
+- `simulate.py` 构建 `GaussianCamera` 并在启动信息中打印 FoV。
+- `README.md` 和 `pipeline.md` 记录 CUDA rasterizer 接入边界。
+
+### 与官方 renderer 的对应关系
+
+官方 `gaussian_renderer.render()` 中的关键输入：
+
+```text
+viewpoint_camera.FoVx / FoVy
+viewpoint_camera.world_view_transform
+viewpoint_camera.full_proj_transform
+viewpoint_camera.camera_center
+pc.get_xyz
+pc.get_opacity
+pc.get_scaling
+pc.get_rotation
+pc.get_features
+optional pc.get_covariance()
+```
+
+当前工程预备接口：
+
+```text
+GaussianCamera.fov_x / fov_y
+GaussianCamera.world_view_transform
+GaussianCamera.full_proj_transform
+GaussianCamera.camera_center
+payload["means3D"]
+payload["opacities"]
+payload["scales"]
+payload["rotations"]
+payload["shs"]
+payload["cov3D_precomp"]
+```
+
+### 当前结论
+
+本轮仍未接入 `torch` 和 `diff_gaussian_rasterization`，也没有编译 CUDA extension。它完成的是正式接入前的数据和相机边界整理，使后续可以把当前 `GaussianParticleSet` 转成官方 rasterizer 的输入。
+
+## 第 14 次改动：修复 Mass-Spring 省略步长参数时的数值发散
+
+### 问题
+
+用户观察到当前版本运行几帧后粒子飞散，表现为上方固定角附近先出现异常。自查后发现：
+
+- 最近 GS 数据和相机接口改动没有直接修改 Mass-Spring 求解公式。
+- 在显式传入 `--dt 0.002 --substeps 4` 时，120 帧 Mass-Spring dense render 保持稳定。
+- 如果省略 `--dt` 和 `--substeps`，旧默认值是：
+
+```text
+dt = 1 / 60
+substeps = 2
+```
+
+这个步长对当前显式 Mass-Spring 求解器过大，会在第 4-5 帧开始速度暴涨，随后出现 `inf/nan`。
+
+### 复现现象
+
+省略步长参数时，诊断输出会迅速变成：
+
+```text
+frame 4: mean_v 明显暴涨
+frame 5: bbox 扩展到百级尺度
+frame 11: mean_v=inf
+frame 12: bbox_min=(nan,nan,nan)
+```
+
+### 修改内容
+
+`simulate.py` 将 `--dt` 和 `--substeps` 改为 mode-aware 默认值：
+
+```text
+mode="mass-spring": dt=0.002,  substeps=4
+mode="elastic":     dt=0.0005, substeps=10
+```
+
+如果用户显式传入 `--dt` 或 `--substeps`，仍然以用户命令行为准。
+
+### 结论
+
+这次问题不是 MPM 或 Mass-Spring 算法公式被 GS 接口改动破坏，而是显式求解器使用了过大的通用默认步长。后续做真正 GS 接入前，应继续保留 `--diagnose-state` 来区分“物理状态发散”和“渲染显示异常”。
+
+## 第 15 次改动：建立可选择渲染后端并接入官方 CUDA GS 接口边界
+
+### 目标
+
+在真正编译和运行官方 CUDA rasterizer 之前，先完成渲染层接口设计：
+
+- 默认渲染管线是 `gs`，对应真正的官方 CUDA 3DGS rasterizer。
+- 保留当前 Taichi 教学 renderer，命名为 `reference`，作为调试和对照路径。
+- `simulate.py` 主循环不直接依赖具体渲染器，只调用统一的 `render_frame()`。
+- 仿真后的 `render_particles` 状态直接送入后端；后续 CUDA 后端可读取同一份动态粒子状态。
+
+### 修改内容
+
+- 新增 `gs_particle_pipeline/render_backend.py`：
+
+```text
+create_renderer("gs" or "reference", ...)
+```
+
+- 新增 `gs_particle_pipeline/cuda_renderer.py`：
+  - `CudaGaussianRenderer`
+  - 运行时导入 `torch` 和 `diff_gaussian_rasterization`
+  - 使用官方 `GaussianRasterizationSettings`
+  - 使用官方 `GaussianRasterizer`
+  - 输出统一为 `uint8 [height, width, 3]`
+- `simulate.py` 新增命令行参数：
+
+```text
+--renderer gs|reference
+--gs-device
+--gs-use-covariance
+```
+
+- `--renderer` 默认值改为：
+
+```text
+gs
+```
+
+- `renderer.py` 继续保留为 Taichi reference renderer。
+- `cuda_rasterizer_adapter.py` 将 `current_covariance` 压缩为官方常用的 6 项对称 covariance 格式，用于 `cov3D_precomp`。
+- `README.md` 和 `pipeline.md` 更新渲染后端说明。
+
+### 当前运行方式
+
+如果本机还没有 CUDA rasterizer 依赖，使用 reference 路径：
+
+```powershell
+python simulate.py --renderer reference --cpu --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484 --dense-render --render-upsample 2 --frames 20
+```
+
+如果后续在虚拟环境或云服务器上安装好官方依赖，则使用默认 GS 路径：
+
+```powershell
+python simulate.py --renderer gs --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484
+```
+
+### 设计结论
+
+这一步没有复制整个 `D:\git_repo\gaussian-splatting` 仓库，也没有引入训练 pipeline。当前只复用官方渲染后端的接口形态，并在 `cuda_renderer.py` 中预留直接调用官方 rasterizer 的最小路径。后续真正要跑 `--renderer gs` 时，需要先在本机虚拟环境或云服务器中安装 `torch` CUDA 和 `diff_gaussian_rasterization`。
+
+## 第 16 次改动：修正密集布料 GS 渲染的默认覆盖比例
+
+### 问题
+
+云端使用官方 GS rasterizer 渲染布料时，画面几乎全黑，只能看到少量白点。自查后发现核心原因不是物理节点数，而是密集渲染层的 Gaussian 尺寸默认值过小：
+
+```text
+旧默认 render_splat_scale = 0.10
+此前测试命令甚至使用过 0.06
+```
+
+`render_splat_scale` 的含义是“占 dense 渲染网格间距的比例”。例如 `22 x 22` 物理网格、`upsample=10` 时，dense 间距约为原网格间距的 1/10；如果再乘 `0.06`，每个 Gaussian 会变成极小的亚像素点，无法互相覆盖成布料面。
+
+### 修改内容
+
+- `DenseClothConfig.splat_scale` 默认值从 `0.10` 改为 `0.80`。
+- `DenseClothConfig.opacity` 默认值从 `0.45` 改为 `0.85`。
+- `simulate.py` 命令行默认值同步修改：
+
+```text
+--render-splat-scale 0.80
+--render-opacity 0.85
+```
+
+- `README.md` 和 `pipeline.md` 同步更新推荐命令。
+
+### 推荐范围
+
+用于形成连续布料面时，建议：
+
+```text
+--render-upsample 5 到 10
+--render-splat-scale 0.60 到 1.20
+--render-opacity 0.70 到 0.95
+```
+
+如果仍然看到离散点，优先增大 `--render-splat-scale`，而不是盲目增加物理 `nx/ny`。
+## 第 17 次改动：自查 CUDA GS 布料视角和稠密渲染诊断
+
+### 问题
+
+云端使用 `--renderer gs` 渲染 Mass-Spring 布料时，画面表现为少量白点、点延伸到屏幕外，和 Taichi reference 中能看到完整布料面的效果差异很大。
+
+### 自查结论
+
+- Mass-Spring 粗物理层仍然只更新 `22 x 22 = 484` 个仿真节点，这是设计预期。
+- 启用 `--dense-render --render-upsample 10` 后，渲染层会生成 `211 x 211 = 44521` 个 Gaussian。已用 reference 后端本地验证启动日志显示 `render_particles=44521, dense=True`。
+- 因此“看起来只有 484 个点”不是稠密层没有生成，而更可能是 CUDA GS 路径的相机投影、屏幕范围、scale 或 opacity 设置导致视觉上没有连成面。
+- CUDA GS 相机发现一处确定问题：官方 `world_view_transform` 和 `projection_matrix` 都采用 transpose 后的 row-vector 约定；当前工程此前只对 world-view 做了 transpose，projection 没有 transpose，可能导致 GS 与 reference 视角不一致。
+
+### 修改内容
+
+- 修正 `gs_particle_pipeline/camera.py` 中 `GaussianCamera.from_config()` 的 projection 矩阵约定：
+
+```text
+projection_matrix = get_projection_matrix(...).transpose()
+full_proj_transform = world_view_transform @ projection_matrix
+```
+
+- 新增 `--diagnose-render` 参数，仅用于 CUDA GS 后端首帧诊断，打印：
+
+```text
+n
+world_bbox_min / world_bbox_max
+camera_z_minmax
+screen_bbox_x / screen_bbox_y
+visible_ndc
+opacity_minmax
+scale_minmax
+```
+
+### 推荐诊断命令
+
+```bash
+python simulate.py --renderer gs --no-window --mode mass-spring --ply assets/mass_spring_sheet.ply --particles 484 --dense-render --render-upsample 10 --render-splat-scale 0.80 --render-opacity 0.85 --frames 1 --spring-nx 22 --spring-ny 22 --width 1280 --height 720 --camera-z 3.0 --focal-length 1100 --pitch -28 --profile --diagnose-state --diagnose-render
+```
+
+启动日志必须包含：
+
+```text
+render_particles=44521, dense=True
+```
+
+诊断日志中如果 `visible_ndc` 很小，优先调整 `--camera-z`、`--focal-length`、`--pitch`；如果 `scale_minmax` 很小，优先增大 `--render-splat-scale`。

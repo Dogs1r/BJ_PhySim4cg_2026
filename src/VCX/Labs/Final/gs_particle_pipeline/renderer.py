@@ -6,6 +6,10 @@ from .config import CameraConfig, RenderConfig
 from .particles import GaussianParticleSet
 
 
+SH_C0 = 0.28209479177387814
+SH_C1 = 0.4886025119029199
+
+
 @ti.data_oriented
 class GaussianRenderer:
     """教学版标准 3DGS 渲染器。
@@ -72,12 +76,12 @@ class GaussianRenderer:
 
     @ti.func
     def _evaluate_sh(self, p: ti.i32, view_dir: ti.types.vector(3, ti.f32)) -> ti.types.vector(3, ti.f32):
-        # 当前保留一阶 SH 教学近似：c0 + cx*x + cy*y + cz*z。
-        # 真正 3DGS 可扩展为 16 项或更高阶 SH。
-        c = self.particles.sh_coefficients[p, 0]
-        c += self.particles.sh_coefficients[p, 1] * view_dir.x
-        c += self.particles.sh_coefficients[p, 2] * view_dir.y
-        c += self.particles.sh_coefficients[p, 3] * view_dir.z
+        # 当前教学 renderer 只评估到一阶 SH；数据层已保留官方 3DGS 的 16 项系数。
+        c = ti.Vector([0.5, 0.5, 0.5])
+        c += self.particles.sh_coefficients[p, 0] * SH_C0
+        c += self.particles.sh_coefficients[p, 1] * (-SH_C1 * view_dir.y)
+        c += self.particles.sh_coefficients[p, 2] * (SH_C1 * view_dir.z)
+        c += self.particles.sh_coefficients[p, 3] * (-SH_C1 * view_dir.x)
         return ti.max(ti.Vector([0.0, 0.0, 0.0]), ti.min(c, ti.Vector([1.0, 1.0, 1.0])))
 
     @ti.kernel
