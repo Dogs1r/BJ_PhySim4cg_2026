@@ -14,6 +14,8 @@ class ElasticMPMConfig:
     domain_max: float = 1.0
     gravity: float = -9.8
     boundary_width: int = 3
+    grid_v_damping_scale: float = 0.999
+    rpic_damping: float = 0.0
 
 
 @ti.data_oriented
@@ -101,6 +103,7 @@ class ElasticMPMSolver:
             if mass > 0.0:
                 v = self.grid_v[i, j, k] / mass
                 v.y += dt * self.config.gravity
+                v *= self.config.grid_v_damping_scale
 
                 bw = self.config.boundary_width
                 if i < bw and v.x < 0.0:
@@ -145,9 +148,14 @@ class ElasticMPMSolver:
                 self.particles.deformation_gradient[p] = ti.Matrix.identity(ti.f32, 3)
             else:
                 self.particles.velocity[p] = new_v
-                self.particles.affine_C[p] = new_c
+                self.particles.affine_C[p] = (1.0 - self.config.rpic_damping) * new_c
                 self.particles.position[p] += dt * new_v
                 self.particles.deformation_gradient[p] = (ti.Matrix.identity(ti.f32, 3) + dt * new_c) @ self.particles.deformation_gradient[p]
+                u, sig, v = ti.svd(self.particles.deformation_gradient[p])
+                clamped = ti.Matrix.zero(ti.f32, 3, 3)
+                for d in ti.static(range(3)):
+                    clamped[d, d] = ti.min(1.8, ti.max(0.45, sig[d, d]))
+                self.particles.deformation_gradient[p] = u @ clamped @ v.transpose()
 
             f = self.particles.deformation_gradient[p]
             self.particles.current_covariance[p] = f @ self.particles.base_covariance[p] @ f.transpose()

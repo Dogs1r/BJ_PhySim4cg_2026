@@ -75,7 +75,7 @@ class GaussianCamera:
     camera_center: np.ndarray
 
     @classmethod
-    def from_config(cls, config: CameraConfig, flip_y: bool = False) -> "GaussianCamera":
+    def from_config(cls, config: CameraConfig) -> "GaussianCamera":
         fov_x = focal_to_fov(config.focal_length, config.width)
         fov_y = focal_to_fov(config.focal_length, config.height)
         world_view = world_view_from_simple_camera(config)
@@ -83,8 +83,7 @@ class GaussianCamera:
         # getWorld2View2/getProjectionMatrix 后再 transpose，供 row-vector
         # 风格的 CUDA rasterizer 使用。
         projection = get_projection_matrix(config.near, config.far, fov_x, fov_y).transpose()
-        if flip_y:
-            projection[1, 1] *= -1.0
+        projection[1, 1] *= -1.0
         full_proj = world_view @ projection
         camera_center = np.linalg.inv(world_view)[3, :3].astype(np.float32)
         return cls(

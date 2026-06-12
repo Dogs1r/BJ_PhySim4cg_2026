@@ -12,6 +12,13 @@ from gs_particle_pipeline.cuda_renderer import CudaRendererUnavailable
 from gs_particle_pipeline.dense_cloth import DenseClothConfig, DenseClothRenderLayer, make_dense_cloth_host_data
 from gs_particle_pipeline.elastic_mpm import ElasticMPMConfig
 from gs_particle_pipeline.mass_spring import MassSpringConfig
+from gs_particle_pipeline.object_mpm_builder import (
+    ElasticObjectRenderConfig,
+    ElasticObjectRenderLayer,
+    ObjectMPMBuilderConfig,
+    build_elastic_object_host_data,
+    build_elastic_render_host_data,
+)
 from gs_particle_pipeline.particles import GaussianParticleSet
 from gs_particle_pipeline.physics_interface import PhysicsBridge
 from gs_particle_pipeline.ply_loader import load_3dgs_ply
@@ -61,15 +68,30 @@ def parse_args():
     parser.add_argument("--gs-scale-modifier", type=float, default=1.0, help="CUDA GS rasterizer scale_modifier")
     parser.add_argument("--gs-color-mode", choices=["sh", "rgb"], default="sh", help="CUDA GS color path: sh or precomputed rgb")
     parser.add_argument("--gs-flip-y", action="store_true", help="Flip CUDA GS projection vertically")
+    parser.add_argument("--no-internal-fill", action="store_true", help="Disable default internal particle filling for elastic MPM")
+    parser.add_argument("--fill-grid", type=int, default=32, help="Voxel resolution used by elastic internal filling")
+    parser.add_argument("--surface-ratio", type=float, default=0.65, help="Elastic particle budget fraction reserved for original surface Gaussians")
+    parser.add_argument("--object-density", type=float, default=200.0, help="Uniform jelly density for scanned elastic objects")
+    parser.add_argument("--object-youngs", type=float, default=1.0e4, help="Uniform jelly Young's modulus for scanned elastic objects")
+    parser.add_argument("--object-poisson", type=float, default=0.40, help="Uniform jelly Poisson ratio for scanned elastic objects")
+    parser.add_argument("--elastic-particles", type=int, default=None, help="Optional elastic MPM simulation particle cap; default uses all source plus filled particles")
+    parser.add_argument("--elastic-render-particles", type=int, default=None, help="Elastic visual Gaussian budget; defaults to source PLY count")
+    parser.add_argument("--elastic-pin-mode", choices=["bottom", "top", "left", "right", "ply", "none"], default="bottom", help="Elastic object pinning policy")
+    parser.add_argument("--elastic-pin-thickness", type=float, default=0.08, help="Pinned bbox band thickness as a fraction of object extent")
+    parser.add_argument("--fill-density-threshold", type=float, default=0.02, help="Gaussian density threshold for filling occupied cells")
+    parser.add_argument("--fill-search-threshold", type=float, default=0.01, help="Gaussian density threshold for internal ray tests")
+    parser.add_argument("--fill-particles-per-cell", type=int, default=1, help="Target filled particles per occupied/internal voxel")
+    parser.add_argument("--jelly-grid-damping", type=float, default=0.999, help="Jelly MPM grid velocity damping scale")
+    parser.add_argument("--jelly-rpic-damping", type=float, default=0.0, help="Jelly APIC affine damping, 0 keeps APIC")
     args = parser.parse_args()
     if args.dt is None:
-        args.dt = 0.002 if args.mode == "mass-spring" else 0.0005
+        args.dt = 0.002 if args.mode == "mass-spring" else 1.0e-4
     if args.substeps is None:
-        args.substeps = 4 if args.mode == "mass-spring" else 10
+        args.substeps = 4 if args.mode == "mass-spring" else 20
     return args
 
 
-def build_pipeline(args):
+def build_common_view(args, render_capacity: int):
     camera = CameraConfig(
         width=args.width,
         height=args.height,
@@ -77,51 +99,20 @@ def build_pipeline(args):
         camera_z=args.camera_z,
         pitch_degrees=args.pitch,
     )
-    gaussian_camera = GaussianCamera.from_config(camera, flip_y=args.gs_flip_y)
-    render_capacity = args.particles
-    if args.dense_render:
-        render_capacity = ((args.spring_nx - 1) * args.render_upsample + 1) * ((args.spring_ny - 1) * args.render_upsample + 1)
-
+    try:
+        gaussian_camera = GaussianCamera.from_config(camera, flip_y=args.gs_flip_y)
+    except TypeError:
+        gaussian_camera = GaussianCamera.from_config(camera)
     render = RenderConfig(
         max_particles=render_capacity,
         tile_radius_scale=args.radius_scale,
         low_pass_variance=args.low_pass,
     )
+    return camera, gaussian_camera, render
 
-    sim_particles = GaussianParticleSet(max_particles=args.particles)
-    sim_host_data = load_3dgs_ply(args.ply, max_particles=args.particles)
-    sim_particles.load_from_host(sim_host_data)
 
-    render_particles = sim_particles
-    dense_layer = None
-    if args.dense_render:
-        dense_config = DenseClothConfig(
-            sim_nx=args.spring_nx,
-            sim_ny=args.spring_ny,
-            upsample=args.render_upsample,
-            splat_scale=args.render_splat_scale,
-            opacity=args.render_opacity,
-        )
-        render_host_data = make_dense_cloth_host_data(sim_host_data, dense_config)
-        render_particles = GaussianParticleSet(max_particles=render_capacity)
-        render_particles.load_from_host(render_host_data)
-        dense_layer = DenseClothRenderLayer(sim_particles, render_particles, dense_config)
-
-    elastic_config = ElasticMPMConfig(grid_size=args.mpm_grid, gravity=args.gravity)
-    mass_spring_config = MassSpringConfig(
-        nx=args.spring_nx,
-        ny=args.spring_ny,
-        stiffness=args.spring_stiffness,
-        damping=args.spring_damping,
-        gravity=args.spring_gravity,
-    )
-    physics = PhysicsBridge(
-        sim_particles,
-        mode=args.mode,
-        elastic_config=elastic_config,
-        mass_spring_config=mass_spring_config,
-    )
-    renderer = create_renderer(
+def build_renderer(args, render_particles, camera, gaussian_camera, render):
+    return create_renderer(
         args.renderer,
         render_particles,
         camera,
@@ -133,7 +124,95 @@ def build_pipeline(args):
         scale_modifier=args.gs_scale_modifier,
         color_mode=args.gs_color_mode,
     )
-    return sim_particles, render_particles, physics, renderer, dense_layer, gaussian_camera
+
+
+def build_elastic_pipeline(args):
+    sim_capacity = args.elastic_particles
+    source_host_data = load_3dgs_ply(args.ply, max_particles=None)
+    object_config = ObjectMPMBuilderConfig(
+        max_particles=sim_capacity,
+        fill_internal=not args.no_internal_fill,
+        fill_grid=args.fill_grid,
+        surface_ratio=args.surface_ratio,
+        density=args.object_density,
+        youngs_modulus=args.object_youngs,
+        poisson_ratio=args.object_poisson,
+        pin_mode=args.elastic_pin_mode,
+        pin_thickness=args.elastic_pin_thickness,
+        density_threshold=args.fill_density_threshold,
+        search_threshold=args.fill_search_threshold,
+        max_particles_per_cell=args.fill_particles_per_cell,
+    )
+    sim_host_data = build_elastic_object_host_data(source_host_data, object_config)
+
+    sim_particles = GaussianParticleSet(max_particles=sim_host_data.position.shape[0])
+    sim_particles.load_from_host(sim_host_data)
+
+    render_budget = args.elastic_render_particles or source_host_data.position.shape[0]
+    render_host_data = build_elastic_render_host_data(
+        source_host_data,
+        ElasticObjectRenderConfig(max_render_particles=render_budget),
+    )
+    render_particles = GaussianParticleSet(max_particles=render_host_data.position.shape[0])
+    render_particles.load_from_host(render_host_data)
+    render_layer = ElasticObjectRenderLayer(sim_particles, render_particles)
+
+    elastic_config = ElasticMPMConfig(
+        grid_size=args.mpm_grid,
+        gravity=args.gravity,
+        grid_v_damping_scale=args.jelly_grid_damping,
+        rpic_damping=args.jelly_rpic_damping,
+    )
+    physics = PhysicsBridge(sim_particles, mode="elastic", elastic_config=elastic_config)
+    camera, gaussian_camera, render = build_common_view(args, render_particles.max_particles)
+    renderer = build_renderer(args, render_particles, camera, gaussian_camera, render)
+    return sim_particles, render_particles, physics, renderer, render_layer, gaussian_camera
+
+
+def build_mass_spring_pipeline(args):
+    if args.elastic_render_particles is not None or args.elastic_particles is not None:
+        raise ValueError("--elastic-particles and --elastic-render-particles are only valid for mode='elastic'")
+
+    sim_host_data = load_3dgs_ply(args.ply, max_particles=args.particles)
+    sim_particles = GaussianParticleSet(max_particles=args.particles)
+    sim_particles.load_from_host(sim_host_data)
+
+    render_particles = sim_particles
+    render_layer = None
+    render_capacity = args.particles
+    if args.dense_render:
+        render_capacity = ((args.spring_nx - 1) * args.render_upsample + 1) * ((args.spring_ny - 1) * args.render_upsample + 1)
+        dense_config = DenseClothConfig(
+            sim_nx=args.spring_nx,
+            sim_ny=args.spring_ny,
+            upsample=args.render_upsample,
+            splat_scale=args.render_splat_scale,
+            opacity=args.render_opacity,
+        )
+        render_host_data = make_dense_cloth_host_data(sim_host_data, dense_config)
+        render_particles = GaussianParticleSet(max_particles=render_capacity)
+        render_particles.load_from_host(render_host_data)
+        render_layer = DenseClothRenderLayer(sim_particles, render_particles, dense_config)
+
+    mass_spring_config = MassSpringConfig(
+        nx=args.spring_nx,
+        ny=args.spring_ny,
+        stiffness=args.spring_stiffness,
+        damping=args.spring_damping,
+        gravity=args.spring_gravity,
+    )
+    physics = PhysicsBridge(sim_particles, mode="mass-spring", mass_spring_config=mass_spring_config)
+    camera, gaussian_camera, render = build_common_view(args, render_capacity)
+    renderer = build_renderer(args, render_particles, camera, gaussian_camera, render)
+    return sim_particles, render_particles, physics, renderer, render_layer, gaussian_camera
+
+
+def build_pipeline(args):
+    if args.mode == "elastic":
+        if args.dense_render:
+            raise ValueError("--dense-render is only valid for mode='mass-spring'; use --elastic-render-particles for elastic rendering density")
+        return build_elastic_pipeline(args)
+    return build_mass_spring_pipeline(args)
 
 
 def encode_video(frame_dir: str, video_path: str, fps: int) -> None:
@@ -160,13 +239,13 @@ def main():
     ti.init(arch=ti.cpu if args.cpu else ti.gpu)
 
     try:
-        particles, render_particles, physics, renderer, dense_layer, gaussian_camera = build_pipeline(args)
+        particles, render_particles, physics, renderer, render_layer, gaussian_camera = build_pipeline(args)
     except CudaRendererUnavailable as exc:
         raise SystemExit(str(exc)) from exc
     print(
         "启动动态渲染: "
-        f"mode={args.mode}, renderer={args.renderer}, sim_particles={args.particles}, "
-        f"render_particles={render_particles.count[None]}, dense={dense_layer is not None}, "
+        f"mode={args.mode}, renderer={args.renderer}, sim_particles={particles.count[None]}, "
+        f"render_particles={render_particles.count[None]}, render_layer={render_layer is not None}, "
         f"frames={args.frames}, substeps={args.substeps}, dt={args.dt}, "
         f"size={args.width}x{args.height}, "
         f"fov=({gaussian_camera.fov_x:.3f},{gaussian_camera.fov_y:.3f}), cpu={args.cpu}",
@@ -191,8 +270,8 @@ def main():
         physics_t0 = time.perf_counter()
         for _ in range(args.substeps):
             physics.step(args.dt)
-        if dense_layer is not None:
-            dense_layer.update()
+        if render_layer is not None:
+            render_layer.update()
         physics_time = time.perf_counter() - physics_t0
 
         render_t0 = time.perf_counter()

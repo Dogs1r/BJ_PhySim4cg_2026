@@ -34,11 +34,9 @@ namespace VCX::Labs::FEM{
         for(int i=0; i<particlePos.size(); i++)
         {
             particleForce[i] += gravity * particle_weight;
-            // friction
             particleForce[i] -= friction * particleVel[i];
         }
 
-        // Limit per-particle force to avoid extreme accelerations for very stiff materials
         const float maxForcePerMass = 1e5f; // multiplier, tuned conservatively
         for(int i=0; i<particleForce.size(); i++){
             float maxF = maxForcePerMass * particle_weight;
@@ -57,7 +55,7 @@ namespace VCX::Labs::FEM{
             }
         }
 
-        // update velocity
+
         for(int i=0; i<particleVel.size(); i++)
         {
             if(!is_fixed(i))
@@ -69,19 +67,14 @@ namespace VCX::Labs::FEM{
             particlePos[i] += particleVel[i] * dt;
         }
 
-        // Simple collision/penetration handling against the plane x=0.
-        // Project any penetrating particle back to x=0 and zero the normal velocity component.
         for(int i=0; i<particlePos.size(); i++){
             if(particlePos[i].x < 0.0f){
                 if(!is_fixed(i)){
                     particlePos[i].x = 0.0f;
-                    // remove normal velocity
                     particleVel[i].x = 0.0f;
-                    // apply tangential friction
                     particleVel[i].y *= (1.0f - std::min(friction, 0.99f));
                     particleVel[i].z *= (1.0f - std::min(friction, 0.99f));
                 } else {
-                    // ensure fixed nodes stay on the plane
                     particlePos[i].x = 0.0f;
                     particleVel[i] = glm::vec3(0.0f);
                 }

@@ -25,13 +25,21 @@ class PhysicsBridge:
         self.time = 0.0
         if mode not in {"elastic", "mass-spring"}:
             raise ValueError("当前版本只支持 mode='elastic' 或 mode='mass-spring'")
-        self.elastic_solver = ElasticMPMSolver(particles, elastic_config or ElasticMPMConfig())
-        self.mass_spring_solver = MassSpringSolver(particles, mass_spring_config or MassSpringConfig())
+        self.elastic_solver = None
+        self.mass_spring_solver = None
+        if mode == "mass-spring":
+            self.mass_spring_solver = MassSpringSolver(particles, mass_spring_config or MassSpringConfig())
+        else:
+            self.elastic_solver = ElasticMPMSolver(particles, elastic_config or ElasticMPMConfig())
 
     def step(self, dt: float) -> None:
         dt = float(dt)
         self.time += dt
         if self.mode == "mass-spring":
+            if self.mass_spring_solver is None:
+                raise RuntimeError("Mass-Spring solver is not initialized")
             self.mass_spring_solver.substep(dt)
         else:
+            if self.elastic_solver is None:
+                raise RuntimeError("Elastic MPM solver is not initialized")
             self.elastic_solver.substep(dt)
